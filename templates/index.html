@@ -1,0 +1,35 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>ICT/SMC Forex Trading App</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='styles.css') }}">
+</head>
+<body>
+    <div class="container">
+        <h1>ICT/SMC Forex Trading</h1>
+        <h2>XAUUSD Signals</h2>
+        <div class="chart">
+            {{ chart | safe }}
+        </div>
+        <h3>Recent Signals</h3>
+        <table>
+            <tr>
+                <th>Date</th>
+                <th>Price</th>
+                <th>Signal</th>
+            </tr>
+            {% for signal in signals %}
+            <tr>
+                <td>{{ signal.index }}</td>
+                <td>{{ signal.price | round(2) }}</td>
+                <td>{{ signal.trade_signal }}</td>
+            </tr>
+            {% endfor %}
+        </table>
+        <p><strong>Trade Result:</strong> {{ trade_result }}</p>
+        <p>Switch to: <a href="/api/signals/USDJPY=X">USDJPY</a></p>
+    </div>
+</body>
+</html>
