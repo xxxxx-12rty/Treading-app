@@ -1,0 +1,159 @@
+from flask import Flask, render_template, jsonify
+import pandas as pd
+import yfinance as yf
+import numpy as np
+import plotly.graph_objects as go
+import datetime
+import requests
+
+app = Flask(__name__)
+
+# OANDA API credentials (update after signup)
+OANDA_API_KEY = 'your_oanda_api_key'
+OANDA_ACCOUNT_ID = 'your_oanda_account_id'
+OANDA_URL = 'https://api-fxpractice.oanda.com/v3'
+HEADERS = {'Authorization': f'Bearer {OANDA_API_KEY}'}
+
+def fetch_data(ticker, start_date, end_date, timeframe='H1'):
+    try:
+        data = yf.download(ticker, start=start_date, end=end_date, interval=timeframe)
+        return data
+    except Exception as e:
+        print(f"Error fetching data: {e}")
+        return pd.DataFrame()
+
+def identify_market_structure(data):
+    signals = pd.DataFrame(index=data.index)
+    signals['price'] = data['Close']
+    signals['high'] = data['High']
+    signals['low'] = data['Low']
+    signals['bos'] = 0
+    signals['choch'] = 0
+    for i in range(2, len(data)):
+        if data['High'].iloc[i] > data['High'].iloc[i-1] and data['Low'].iloc[i] > data['Low'].iloc[i-1]:
+            signals['bos'].iloc[i] = 1
+        elif data['High'].iloc[i] < data['High'].iloc[i-1] and data['Low'].iloc[i] < data['Low'].iloc[i-1]:
+            signals['bos'].iloc[i] = -1
+        if signals['bos'].iloc[i-1] == -1 and data['High'].iloc[i] > data['High'].iloc[i-1]:
+            signals['choch'].iloc[i] = 1
+        elif signals['bos'].iloc[i-1] == 1 and data['Low'].iloc[i] < data['Low'].iloc[i-1]:
+            signals['choch'].iloc[i] = -1
+    return signals
+
+def identify_order_blocks(data, signals):
+    signals['order_block'] = 0
+    for i in range(1, len(data)):
+        if signals['bos'].iloc[i] == 1:
+            signals['order_block'].iloc[i-1] = data['Close'].iloc[i-1]
+        elif signals['bos'].iloc[i] == -1:
+            signals['order_block'].iloc[i-1] = data['Close'].iloc[i-1]
+    return signals
+
+def detect_fvg(data):
+    signals = pd.DataFrame(index=data.index)
+    signals['fvg'] = ''
+    signals['fvg_price'] = 0
+    for i in range(2, len(data)):
+        if data['High'].iloc[i-2] < data['Low'].iloc[i] and data['Close'].iloc[i-1] < data['Low'].iloc[i]:
+            signals['fvg'].iloc[i] = 'bullish'
+            signals['fvg_price'].iloc[i] = data['Low'].iloc[i]
+        elif data['Low'].iloc[i-2] > data['High'].iloc[i] and data['Close'].iloc[i-1] > data['High'].iloc[i]:
+            signals['fvg'].iloc[i] = 'bearish'
+            signals['fvg_price'].iloc[i] = data['High'].iloc[i]
+    return signals
+
+def generate_signals(data, signals, fvg_signals):
+    signals['trade_signal'] = ''
+    for i in range(1, len(signals)):
+        price = signals['price'].iloc[i]
+        if signals['bos'].iloc[i] == 1 and signals['order_block'].iloc[i-1] > 0:
+            ob_price = signals['order_block'].iloc[i-1]
+            if abs(price - ob_price) / ob_price < 0.01:
+                signals['trade_signal'].iloc[i] = 'BUY'
+        elif signals['bos'].iloc[i] == -1 and signals['order_block'].iloc[i-1] > 0:
+            ob_price = signals['order_block'].iloc[i-1]
+            if abs(price - ob_price) / ob_price < 0.01:
+                signals['trade_signal'].iloc[i] = 'SELL'
+        elif fvg_signals['fvg'].iloc[i] == 'bullish' and abs(price - fvg_signals['fvg_price'].iloc[i]) / price < 0.01:
+            signals['trade_signal'].iloc[i] = 'BUY'
+        elif fvg_signals['fvg'].iloc[i] == 'bearish' and abs(price - fvg_signals['fvg_price'].iloc[i]) / price < 0.01:
+            signals['trade_signal'].iloc[i] = 'SELL'
+        elif signals['choch'].iloc[i] != 0:
+            signals['trade_signal'].iloc[i] = 'EXIT'
+    return signals
+
+def execute_trade(instrument, units, side):
+    try:
+        url = f"{OANDA_URL}/accounts/{OANDA_ACCOUNT_ID}/orders"
+        data = {
+            "order": {
+                "units": str(units if side == 'buy' else -units),
+                "instrument": instrument,
+                "type": "MARKET",
+                "timeInForce": "FOK"
+            }
+        }
+        response = requests.post(url, headers=HEADERS, json=data)
+        return f"Placed {side} order for {units} units of {instrument}"
+    except Exception as e:
+        return f"Trade error: {e}"
+
+def generate_chart(data, signals, fvg_signals):
+    fig = go.Figure()
+    fig.add_trace(go.Candlestick(x=data.index,
+                                open=data['Open'], high=data['High'],
+                                low=data['Low'], close=data['Close'], name='Price'))
+    fig.add_trace(go.Scatter(x=signals[signals['bos'] == 1].index, 
+                             y=signals['price'][signals['bos'] == 1], 
+                             mode='markers', marker=dict(symbol='triangle-up', size=10, color='green'), name='Bullish BOS'))
+    fig.add_trace(go.Scatter(x=signals[signals['bos'] == -1].index, 
+                             y=signals['price'][signals['bos'] == -1], 
+                             mode='markers', marker=dict(symbol='triangle-down', size=10, color='red'), name='Bearish BOS'))
+    fig.add_trace(go.Scatter(x=signals[signals['order_block'] > 0].index, 
+                             y=signals['order_block'][signals['order_block'] > 0], 
+                             mode='markers', marker=dict(symbol='square', size=8, color='yellow'), name='Order Block'))
+    fig.add_trace(go.Scatter(x=fvg_signals[fvg_signals['fvg'] == 'bullish'].index, 
+                             y=fvg_signals['fvg_price'][fvg_signals['fvg'] == 'bullish'], 
+                             mode='markers', marker=dict(symbol='circle', size=8, color='cyan'), name='Bullish FVG'))
+    fig.add_trace(go.Scatter(x=fvg_signals[fvg_signals['fvg'] == 'bearish'].index, 
+                             y=fvg_signals['fvg_price'][fvg_signals['fvg'] == 'bearish'], 
+                             mode='markers', marker=dict(symbol='circle', size=8, color='magenta'), name='Bearish FVG'))
+    fig.update_layout(title='ICT/SMC Trading Strategy', xaxis_title='Date', yaxis_title='Price', 
+                      template='plotly_dark', height=600, width=800)
+    return fig.to_html(full_html=False)
+
+@app.route('/')
+def index():
+    ticker = 'XAUUSD=X'
+    start_date = (datetime.datetime.now() - datetime.timedelta(days=30)).strftime('%Y-%m-%d')
+    end_date = datetime.datetime.now().strftime('%Y-%m-%d')
+    data = fetch_data(ticker, start_date, end_date, timeframe='1h')
+    if data.empty:
+        return render_template('index.html', chart="", signals=[], trade_result="No data available")
+    signals = identify_market_structure(data)
+    signals = identify_order_blocks(data, signals)
+    fvg_signals = detect_fvg(data)
+    signals = generate_signals(data, signals, fvg_signals)
+    chart = generate_chart(data, signals, fvg_signals)
+    signals_list = signals[['price', 'trade_signal']].tail(10).to_dict('records')
+    latest_signal = signals['trade_signal'].iloc[-1]
+    trade_result = "No trade executed"
+    if latest_signal == 'BUY':
+        trade_result = execute_trade(ticker.replace('=X', '_'), 1000, 'buy')
+    elif latest_signal == 'SELL':
+        trade_result = execute_trade(ticker.replace('=X', '_'), 1000, 'sell')
+    return render_template('index.html', chart=chart, signals=signals_list, trade_result=trade_result)
+
+@app.route('/api/signals/<ticker>')
+def api_signals(ticker):
+    start_date = (datetime.datetime.now() - datetime.timedelta(days=30)).strftime('%Y-%m-%d')
+    end_date = datetime.datetime.now().strftime('%Y-%m-%d')
+    data = fetch_data(ticker, start_date, end_date, timeframe='1h')
+    signals = identify_market_structure(data)
+    signals = identify_order_blocks(data, signals)
+    fvg_signals = detect_fvg(data)
+    signals = generate_signals(data, signals, fvg_signals)
+    return jsonify(signals[['price', 'trade_signal']].tail(10).to_dict('records'))
+
+if __name__ == '__main__':
+    app.run(host='0.0.0.0', port=5000, debug=True)
